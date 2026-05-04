@@ -1,20 +1,19 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { AUTH_COOKIES, SESSION_COOKIE } from "@/lib/auth";
+import { SESSION_COOKIE } from "@/lib/auth";
 import { destroySession } from "@/lib/session-store";
 
 export async function POST() {
   const cookieStore = await cookies();
-  destroySession(cookieStore.get(SESSION_COOKIE)?.value);
+  const sessionId = cookieStore.get(SESSION_COOKIE)?.value;
+  destroySession(sessionId);
 
   const response = NextResponse.json({ ok: true });
-  for (const name of AUTH_COOKIES) {
-    response.cookies.set({
-      name,
-      value: "",
-      path: "/",
-      maxAge: 0,
-    });
-  }
+  response.cookies.set({
+    name: SESSION_COOKIE,
+    value: "",
+    path: "/",
+    maxAge: 0,
+  });
   return response;
 }

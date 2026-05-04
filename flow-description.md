@@ -33,32 +33,21 @@ That's it. There is no token, no cryptographic signature, no session negotiation
 ### High-level flow in this app
 
 ```mermaid
-sequenceDiagram
-    autonumber
-    actor User
-    participant Form as Login Form<br/>(/basic-authentication)
-    participant API as API<br/>(/api/basic-auth)
-    participant Success as Protected Page<br/>(/login-successfully)
-
-    User->>Form: Visit /basic-authentication
-    Form-->>User: Render email + password form
-    User->>Form: Submit credentials
-    Form->>API: GET /api/basic-auth<br/>Authorization: Basic base64(email:password)
-
-    alt Valid credentials
-        API-->>Form: 200 OK<br/>Set-Cookie: basic-auth-session
-        Form->>Success: router.push("/login-successfully")
-        Success-->>User: Show "Login Successfully"
-    else Invalid credentials
-        API-->>Form: 401 Unauthorized
-        Form-->>User: Show inline error
-    end
-
-    User->>Success: Click Logout
-    Success->>API: POST /api/logout
-    API-->>Success: Clear all auth cookies
-    Success-->>User: Redirect to /
+flowchart LR
+    U([User]) -->|1. Open page| F[Login Form<br/>/basic-authentication]
+    F -->|2. Submit creds| API[/api/basic-auth/]
+    API -->|3a. 200 OK<br/>Set-Cookie| F
+    API -->|3b. 401 Unauthorized| F
+    F -->|4. Redirect on success| P[/login-successfully/]
+    P -->|5. Click Logout| OUT[/api/logout/]
+    OUT -->|6. Clear cookies| H([/ home])
 ```
+
+**Login (happy path):** open the form → submit email + password → API validates and sets `basic-auth-session` cookie → client redirects to `/login-successfully`.
+
+**Login (failure):** API returns `401` and the form shows an inline error.
+
+**Logout:** the success page calls `POST /api/logout`, which clears every auth cookie, then the client navigates back to `/`.
 
 After login, the cookie is what keeps the user "signed in" for the protected page. Logout deletes that cookie.
 
@@ -203,3 +192,183 @@ These apply to a real-world implementation, not this demo:
 4. While on `/login-successfully`, click **Logout** → you return to `/`.
 5. Manually visit `/login-successfully` after logout → you are redirected back to `/`.
 6. Manually visit `/basic-authentication` while logged in → you are redirected to `/login-successfully`.
+
+---
+
+## Session-Based Authentication
+
+### What is Session-Based Authentication?
+
+Session-based auth is the classic web login pattern. Instead of sending credentials with every request, the user logs in **once**, the server creates a **session record** on its side, and gives the client a small **session ID** in a cookie. From then on, the cookie is the proof of identity.
+
+The server is the source of truth: as long as the session ID maps to a valid record on the server, the user is "logged in." Logout simply deletes the record.
+
+Compared to Basic Authentication:
+
+| | Basic Auth | Session Auth |
+|---|---|---|
+| Credentials sent | On **every** request | Only on **login** |
+| Server state | None | Session store (memory / Redis / DB) |
+| Identifier | The credentials themselves | An opaque session ID |
+| Logout | Client just stops sending the header | Server deletes the session record |
+| Scales horizontally | Yes (stateless) | Needs a shared session store |
+
+### High-level flow
+
+```mermaid
+flowchart LR
+    U([User]) -->|1. Open page| F[Login Form<br/>/session-authentication]
+    F -->|2. Submit creds| API[/api/session/login/]
+    API -->|3. createSession| S[(Session Store)]
+    API -->|4. 200 OK<br/>Set-Cookie session-id| F
+    F -->|5. Redirect on success| P[/login-successfully/]
+    P -->|6. getSession| S
+    P -->|7. Click Logout| OUT[/api/logout/]
+    OUT -->|8. destroySession| S
+    OUT -->|9. Clear cookie| H([/ home])
+```
+
+**Login (happy path):** form POSTs creds → API validates → creates a record in the session store → returns a session ID in an httpOnly cookie → client redirects to `/login-successfully`.
+
+**Login (failure):** API returns `401`; the form shows an inline error.
+
+**Logout:** the success page calls `POST /api/logout`, which destroys the session record on the server and clears every auth cookie, then the client navigates to `/`.
+
+### Routes and pages
+
+| Path                          | Type                 | Purpose                                                                  |
+| ----------------------------- | -------------------- | ------------------------------------------------------------------------ |
+| `/session-authentication`     | Page (server)        | Login form. If a valid session cookie exists, redirects to success.      |
+| `/api/session/login`          | Route handler (POST) | Validates credentials, creates a session record, sets the cookie.        |
+| `/api/session/logout`         | Route handler (POST) | Destroys this user's session and clears the cookie.                      |
+| `/api/session/me`             | Route handler (GET)  | Returns the currently logged-in user (handy for client-side checks).     |
+| `/api/logout`                 | Route handler (POST) | Generic logout: destroys server session **and** clears every auth cookie. |
+
+### Files
+
+```
+app/
+├── session-authentication/
+│   ├── page.tsx                                   # Server page: guard + render form
+│   └── _components/login-form.tsx                 # Client form: POST credentials
+└── api/
+    └── session/
+        ├── login/route.ts                         # Validate creds, create session, set cookie
+        ├── logout/route.ts                        # Destroy session, clear cookie
+        └── me/route.ts                            # Return current user
+lib/
+├── auth.ts                                        # Shared cookie names (incl. SESSION_COOKIE)
+└── session-store.ts                               # In-memory session store (id → user)
+```
+
+### Step-by-step walkthrough
+
+#### 1. The session store
+
+`lib/session-store.ts` holds an in-memory `Map<sessionId, SessionData>`. Each record has the user info, a creation time, and an expiry. We attach the map to `globalThis` so it survives Next.js dev hot-reloads:
+
+```ts
+const store: SessionStore =
+  globalForSessions.__sessionStore ?? new Map();
+```
+
+API:
+
+```ts
+createSession({ userId, email })   // → returns { id, ... } and stores it
+getSession(id)                     // → returns record or null (also expires it)
+destroySession(id)                 // → removes the record
+```
+
+> In production you'd swap this for Redis, a database table, or a managed session service. The interface stays the same.
+
+#### 2. The login page
+
+`app/session-authentication/page.tsx` is a server component. Before rendering it checks the cookie **against the session store** (not just whether the cookie exists):
+
+```ts
+const session = getSession(cookieStore.get(SESSION_COOKIE)?.value);
+if (session) redirect("/login-successfully");
+```
+
+That's the key difference from Basic Auth: the server has authoritative state. A stale or revoked session ID won't pass `getSession`.
+
+#### 3. The login form
+
+`app/session-authentication/_components/login-form.tsx` POSTs the credentials as JSON:
+
+```ts
+const response = await fetch("/api/session/login", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ email, password }),
+});
+```
+
+On `200` it redirects to `/login-successfully`; on `401` it shows an inline error.
+
+#### 4. The login API
+
+`app/api/session/login/route.ts` does:
+
+1. Parse JSON body.
+2. Validate `email` / `password` against the demo credentials.
+3. `createSession(...)` → gets a fresh, random session ID via `crypto.randomUUID()`.
+4. Sets the cookie:
+
+```ts
+response.cookies.set({
+  name: SESSION_COOKIE,           // "session-id"
+  value: session.id,
+  httpOnly: true,                  // not readable by JS (mitigates XSS)
+  sameSite: "lax",                 // mitigates CSRF on top-level navigations
+  path: "/",
+  maxAge: SESSION_TTL_MS / 1000,   // matches the server-side expiry
+});
+```
+
+#### 5. The success page
+
+`app/login-successfully/page.tsx` is shared by every flow. For session auth it validates against the store:
+
+```ts
+const hasValidSession = Boolean(
+  getSession(cookieStore.get(SESSION_COOKIE)?.value),
+);
+if (!hasBasicAuth && !hasValidSession) redirect("/");
+```
+
+#### 6. Logout
+
+Two endpoints can log a session user out, both call `destroySession`:
+
+- `POST /api/session/logout` — for a session-only logout.
+- `POST /api/logout` — the global logout used by the success page; destroys the server session **and** clears every auth cookie. This is what the Logout button calls so the same button works regardless of which flow logged the user in.
+
+### Demo credentials
+
+```
+email:    admin@example.com
+password: password
+```
+
+Hardcoded in `app/api/session/login/route.ts`.
+
+### Security notes
+
+- **Use HTTPS in production** — the session ID in the cookie is a bearer token; if someone steals it, they are the user.
+- **`httpOnly` + `sameSite: lax`** — set on the cookie to limit XSS theft and most CSRF.
+- **Rotate session IDs on privilege change** (e.g. login, role change) to defend against session fixation.
+- **Don't store secrets in the session record** — store only what you need (user id, role, etc.).
+- **Persistent store in production** — an in-memory Map is fine for one Node process. With multiple instances or restarts, use Redis / DB.
+- **TTL and idle timeout** — expire sessions both absolutely (e.g. 24h) and after inactivity.
+- **Hash passwords** — never compare plain strings against a database; use `bcrypt`/`argon2`.
+
+### Quick test checklist
+
+1. Go to `/` → choose **Session Authentication** → click **Go**.
+2. Enter `admin@example.com` / `password` → land on `/login-successfully`.
+3. Open DevTools → Application → Cookies: you should see `session-id` (httpOnly).
+4. Click **Logout** → you return to `/` and the `session-id` cookie is gone.
+5. Manually visit `/login-successfully` after logout → redirected to `/` (server can't find the session in the store, even if you re-add a fake cookie).
+6. Manually visit `/session-authentication` while logged in → redirected to `/login-successfully`.

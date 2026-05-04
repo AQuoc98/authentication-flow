@@ -28,18 +28,21 @@ export default function Home() {
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="basic">Basic Authentication</SelectItem>
+              <SelectItem value="session">Session Authentication</SelectItem>
               <SelectItem value="jwt">JWT Authentication</SelectItem>
             </SelectContent>
           </Select>
         </div>
         <Button
-          onClick={() =>
-            router.push(
+          onClick={() => {
+            const path =
               value === "basic"
                 ? "/basic-authentication"
-                : "/jwt-authentication",
-            )
-          }
+                : value === "session"
+                  ? "/session-authentication"
+                  : "/jwt-authentication";
+            router.push(path);
+          }}
         >
           Go
         </Button>

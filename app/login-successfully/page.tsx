@@ -1,15 +1,18 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
-import { AUTH_COOKIES } from "@/lib/auth";
+import { BASIC_AUTH_COOKIE, SESSION_COOKIE } from "@/lib/auth";
+import { getSession } from "@/lib/session-store";
 import LogoutButton from "./_components/logout-button";
 
 export default async function LoginSuccessfullyPage() {
   const cookieStore = await cookies();
-  const isAuthenticated = AUTH_COOKIES.some(
-    (name) => cookieStore.get(name)?.value,
+
+  const hasBasicAuth = Boolean(cookieStore.get(BASIC_AUTH_COOKIE)?.value);
+  const hasValidSession = Boolean(
+    getSession(cookieStore.get(SESSION_COOKIE)?.value),
   );
 
-  if (!isAuthenticated) {
+  if (!hasBasicAuth && !hasValidSession) {
     redirect("/");
   }
 

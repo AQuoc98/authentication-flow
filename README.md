@@ -18,5 +18,8 @@ bun dev
 
 ## Release Notes
 
+- Template Login Form referred from [Shadcn Studio](https://shadcnstudio.com/blocks/marketing-ui/login-page)
+
 ### Version 1.0
-- [ ] Basic authentication flow implemented
+
+- [x] Basic authentication flow implemented

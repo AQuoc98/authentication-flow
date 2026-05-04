@@ -29,6 +29,7 @@ export default function Home() {
             <SelectContent>
               <SelectItem value="basic">Basic Authentication</SelectItem>
               <SelectItem value="session">Session Authentication</SelectItem>
+              <SelectItem value="token">Token Based Authentication</SelectItem>
               <SelectItem value="jwt">JWT Authentication</SelectItem>
             </SelectContent>
           </Select>
@@ -40,7 +41,7 @@ export default function Home() {
                 ? "/basic-authentication"
                 : value === "session"
                   ? "/session-authentication"
-                  : "/jwt-authentication";
+                  : "/token-authentication";
             router.push(path);
           }}
         >

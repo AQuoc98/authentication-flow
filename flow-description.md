@@ -33,14 +33,28 @@ That's it. There is no token, no cryptographic signature, no session negotiation
 ### High-level flow in this app
 
 ```mermaid
-flowchart LR
-    U([User]) -->|1. Open page| F[Login Form<br/>/basic-authentication]
-    F -->|2. Submit creds| API[/api/basic-auth/]
-    API -->|3a. 200 OK<br/>Set-Cookie| F
-    API -->|3b. 401 Unauthorized| F
-    F -->|4. Redirect on success| P[/login-successfully/]
-    P -->|5. Click Logout| OUT[/api/logout/]
-    OUT -->|6. Clear cookies| H([/ home])
+sequenceDiagram
+    autonumber
+    actor User
+    participant Form as Login Form
+    participant API as /api/basic-auth
+
+    User->>Form: Open /basic-authentication
+    User->>Form: Submit email + password
+    Form->>API: GET with Authorization Basic base64(email:password)
+
+    alt Valid credentials
+        API-->>Form: 200 OK + Set-Cookie basic-auth-session
+        Form-->>User: Redirect to /login-successfully
+    else Invalid credentials
+        API-->>Form: 401 Unauthorized
+        Form-->>User: Show inline error
+    end
+
+    User->>Form: Click Logout (on success page)
+    Form->>API: POST /api/logout
+    API-->>Form: Clear all auth cookies
+    Form-->>User: Redirect to /
 ```
 
 **Login (happy path):** open the form → submit email + password → API validates and sets `basic-auth-session` cookie → client redirects to `/login-successfully`.
@@ -216,16 +230,32 @@ Compared to Basic Authentication:
 ### High-level flow
 
 ```mermaid
-flowchart LR
-    U([User]) -->|1. Open page| F[Login Form<br/>/session-authentication]
-    F -->|2. Submit creds| API[/api/session/login/]
-    API -->|3. createSession| S[(Session Store)]
-    API -->|4. 200 OK<br/>Set-Cookie session-id| F
-    F -->|5. Redirect on success| P[/login-successfully/]
-    P -->|6. getSession| S
-    P -->|7. Click Logout| OUT[/api/logout/]
-    OUT -->|8. destroySession| S
-    OUT -->|9. Clear cookie| H([/ home])
+sequenceDiagram
+    autonumber
+    actor User
+    participant Form as Login Form
+    participant API as /api/session/login
+    participant Store as Session Store
+
+    User->>Form: Open /session-authentication
+    User->>Form: Submit email + password
+    Form->>API: POST { email, password }
+
+    alt Valid credentials
+        API->>Store: createSession(user)
+        Store-->>API: sessionId
+        API-->>Form: 200 OK + Set-Cookie session-id
+        Form-->>User: Redirect to /login-successfully
+    else Invalid credentials
+        API-->>Form: 401 Unauthorized
+        Form-->>User: Show inline error
+    end
+
+    User->>Form: Click Logout (on success page)
+    Form->>API: POST /api/logout
+    API->>Store: destroySession(sessionId)
+    API-->>Form: Clear session-id cookie
+    Form-->>User: Redirect to /
 ```
 
 **Login (happy path):** form POSTs creds → API validates → creates a record in the session store → returns a session ID in an httpOnly cookie → client redirects to `/login-successfully`.
@@ -372,3 +402,197 @@ Hardcoded in `app/api/session/login/route.ts`.
 4. Click **Logout** → you return to `/` and the `session-id` cookie is gone.
 5. Manually visit `/login-successfully` after logout → redirected to `/` (server can't find the session in the store, even if you re-add a fake cookie).
 6. Manually visit `/session-authentication` while logged in → redirected to `/login-successfully`.
+
+---
+
+## Token-Based Authentication (SWT)
+
+### What is Token-Based Authentication?
+
+Instead of repeatedly sending **credentials** (Basic) or holding **server-side state** (Session), the server hands the client a signed **token** after a successful login. From then on, the client attaches that token to every request — usually in the `Authorization: Bearer <token>` header — and the server can verify it without looking anything up.
+
+This implementation uses **SWT (Simple Web Token)** — a name/value-pair token signed with HMAC-SHA256.
+
+### How a token is built
+
+A SWT is a URL-encoded query string with a trailing HMAC signature:
+
+```
+Issuer=auth-flow&Subject=user_1&Email=admin%40example.com&ExpiresOn=1735689600000&HMACSHA256=<base64url-sig>
+```
+
+- The **payload** is everything before `&HMACSHA256=`.
+- The **signature** is `HMAC_SHA256(secret, payload)`, base64url-encoded.
+- To **verify**: re-compute the HMAC over the payload and compare in constant time. If it matches, check `ExpiresOn`.
+
+The server doesn't store the token. Validity is determined entirely by the signature + expiry. This is what makes the approach **stateless**.
+
+### Token characteristics (matches the reference image)
+
+- A random-looking string (because of the HMAC).
+- Has an expiry — once `ExpiresOn` passes, it is rejected.
+- Signed with a secret, so any tampering breaks the signature.
+- **Self-contained** — the claims (Subject, Email, etc.) live inside the token. (SWT is self-contained, contrast with opaque tokens like session IDs.)
+- Sent in the `Authorization` header on every protected request.
+
+### High-level flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant Form as Login Form
+    participant API as /api/token/login
+    participant Storage as Browser Storage
+
+    User->>Form: Open /token-authentication
+    User->>Form: Submit email + password
+    Form->>API: POST { email, password }
+
+    alt Valid credentials
+        API-->>Form: 200 OK + token in body + Set-Cookie swt-token
+        Form->>Storage: Save token in localStorage
+        Form-->>User: Redirect to /login-successfully
+    else Invalid credentials
+        API-->>Form: 422 Unprocessable Entity
+        Form-->>User: Show inline error
+    end
+
+    Note over Form,API: Subsequent protected requests:<br/>Authorization: Bearer <token>
+
+    User->>Form: Click Logout (on success page)
+    Form->>API: POST /api/logout
+    API-->>Form: Clear swt-token cookie
+    Form->>Storage: Clear localStorage
+    Form-->>User: Redirect to /
+```
+
+**Login (happy path):** form POSTs creds → API validates → server **signs** and returns the token in the response body → client stores it in `localStorage` and the server also drops it into a `swt-token` cookie → client redirects to `/login-successfully`.
+
+**Login (failure):** API returns `422 Unprocessable Entity` (per the reference) and the form shows an inline error.
+
+**Authenticated requests:** the client sends `Authorization: Bearer <token>` with each request. The server returns `401` if the token is missing/tampered/expired, otherwise `200`.
+
+**Logout:** the client clears `localStorage` and calls `POST /api/logout`, which clears the cookie. Because tokens are stateless, there is **no server-side revocation** — the token is valid until `ExpiresOn`. (Real apps add a deny-list or rotate the signing key to revoke early.)
+
+### Routes and pages
+
+| Path                       | Type                  | Purpose                                                           |
+| -------------------------- | --------------------- | ----------------------------------------------------------------- |
+| `/token-authentication`    | Page (server)         | Login form. If a valid token cookie exists, redirects to success. |
+| `/api/token/login`         | Route handler (POST)  | Validates creds; returns SWT in body and `swt-token` cookie.      |
+| `/api/token/me`            | Route handler (GET)   | Verifies `Authorization: Bearer ...`, returns the user.           |
+| `/api/token/logout`        | Route handler (POST)  | Clears the `swt-token` cookie (token-only logout).                |
+| `/api/logout`              | Route handler (POST)  | Generic logout — clears every auth cookie (basic, session, token, …). |
+
+### Files
+
+```
+app/
+├── token-authentication/
+│   ├── page.tsx                                   # Server page: guard + render form
+│   └── _components/login-form.tsx                 # Client form: POST creds, store token
+└── api/
+    └── token/
+        ├── login/route.ts                         # Validate creds, sign + return token
+        ├── me/route.ts                            # Verify Bearer token, return user
+        └── logout/route.ts                        # Clear token cookie
+lib/
+├── auth.ts                                        # Adds TOKEN_COOKIE = "swt-token"
+└── swt.ts                                         # createSwt / verifySwt (HMAC-SHA256)
+```
+
+### Step-by-step walkthrough
+
+#### 1. Signing & verifying — `lib/swt.ts`
+
+```ts
+createSwt({ Issuer, Subject, Email })  // builds payload + HMAC, returns string
+verifySwt(token)                        // recomputes HMAC, checks expiry, returns claims | null
+```
+
+`verifySwt` uses `crypto.timingSafeEqual` to defend against timing attacks when comparing signatures.
+
+#### 2. The login API — `app/api/token/login/route.ts`
+
+1. Parses JSON body `{ email, password }`.
+2. Validates against demo creds. **Bad creds → `422 Unprocessable Entity`** (matches the reference).
+3. On success, calls `createSwt({ Issuer: "auth-flow", Subject: "user_1", Email })`.
+4. Returns:
+   ```json
+   { "token": "...", "tokenType": "SWT", "expiresIn": 3600, "user": {...} }
+   ```
+5. Also sets `swt-token` cookie (so server-side guards can verify without reading `localStorage`).
+
+#### 3. The login form — `app/token-authentication/_components/login-form.tsx`
+
+```ts
+const response = await fetch("/api/token/login", { method: "POST", body: JSON.stringify({ email, password }) });
+if (response.ok) {
+  const data = await response.json();
+  window.localStorage.setItem("swt-token", data.token);
+  router.push("/login-successfully");
+}
+```
+
+The token is stored in **two** places intentionally:
+
+- `localStorage` — so client-side `fetch` can attach it to `Authorization: Bearer ...` headers.
+- `swt-token` cookie — so the server-rendered guard on `/login-successfully` and `/token-authentication` can verify it.
+
+#### 4. Calling protected APIs
+
+Client code reads the token from `localStorage` and sends it explicitly:
+
+```ts
+const token = localStorage.getItem("swt-token");
+fetch("/api/token/me", { headers: { Authorization: `Bearer ${token}` } });
+```
+
+`/api/token/me` rejects with `401` if missing/invalid; returns user info on success.
+
+#### 5. Page guards
+
+`/token-authentication/page.tsx` redirects to `/login-successfully` if `verifySwt(cookie)` returns valid claims.
+
+`/login-successfully/page.tsx` accepts any of: valid Basic cookie, valid session, **or** valid SWT cookie:
+
+```ts
+const hasValidToken = Boolean(verifySwt(cookieStore.get(TOKEN_COOKIE)?.value ?? ""));
+if (!hasBasicAuth && !hasValidSession && !hasValidToken) redirect("/");
+```
+
+#### 6. Logout
+
+The shared Logout button calls `POST /api/logout`, which clears every auth cookie. The client also wipes `localStorage`, removing the SWT from the browser. The token itself **remains cryptographically valid until expiry** — see the security note below.
+
+### Demo credentials
+
+```
+email:    admin@example.com
+password: password
+```
+
+Hardcoded in `app/api/token/login/route.ts`.
+
+### Security notes
+
+- **Use a strong random `SWT_SECRET`** in production (env var). If the secret leaks, attackers can forge tokens.
+- **HTTPS only.** A bearer token in transit over HTTP can be replayed by anyone who sees it.
+- **Short expiries + refresh tokens.** Stateless tokens cannot be revoked individually before expiry. Use short-lived access tokens (e.g. 5–15 min) plus a refresh-token flow, or a deny-list.
+- **`localStorage` is XSS-readable.** If the site is XSS-vulnerable, the token is stolen. An httpOnly cookie is safer; this demo uses both for clarity. In real apps prefer httpOnly cookies (with CSRF protection) for browser clients.
+- **Sign claims you actually need.** The token is visible to clients (self-contained). Don't put secrets in it.
+- **Rotate keys** periodically; supporting multiple active keys lets you rotate without invalidating live sessions all at once.
+- **Prefer JWT in production.** SWT is shown here because the format is dead simple and great for learning. JWT/JWS is the modern standard with broader library support.
+
+### Quick test checklist
+
+1. Go to `/` → choose **Token Based Authentication** → click **Go**.
+2. Submit `admin@example.com` / `password` → land on `/login-successfully`.
+3. Open DevTools:
+   - **Application → Local Storage** has `swt-token`.
+   - **Application → Cookies** has `swt-token`.
+4. In the Console: `await fetch("/api/token/me", { headers: { Authorization: "Bearer " + localStorage.getItem("swt-token") } }).then(r => r.json())` → returns the user.
+5. Tamper with the token (e.g. change one character) and retry → `401`.
+6. Click **Logout** → cookie + localStorage are cleared, you return to `/`.
+7. Manually visit `/token-authentication` while logged in → redirected to `/login-successfully`.

@@ -1,7 +1,8 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
-import { BASIC_AUTH_COOKIE, SESSION_COOKIE } from "@/lib/auth";
+import { BASIC_AUTH_COOKIE, SESSION_COOKIE, TOKEN_COOKIE } from "@/lib/auth";
 import { getSession } from "@/lib/session-store";
+import { verifySwt } from "@/lib/swt";
 import LogoutButton from "./_components/logout-button";
 
 export default async function LoginSuccessfullyPage() {
@@ -11,8 +12,11 @@ export default async function LoginSuccessfullyPage() {
   const hasValidSession = Boolean(
     getSession(cookieStore.get(SESSION_COOKIE)?.value),
   );
+  const hasValidToken = Boolean(
+    verifySwt(cookieStore.get(TOKEN_COOKIE)?.value ?? ""),
+  );
 
-  if (!hasBasicAuth && !hasValidSession) {
+  if (!hasBasicAuth && !hasValidSession && !hasValidToken) {
     redirect("/");
   }
 

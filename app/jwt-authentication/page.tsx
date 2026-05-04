@@ -1,19 +1,19 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import AuthPageShell from "@/app/_components/auth-page-shell";
-import { SESSION_COOKIE } from "@/lib/auth";
-import { getSession } from "@/lib/session-store";
+import { JWT_COOKIE } from "@/lib/auth";
+import { verifyJwt } from "@/lib/jwt";
 import LoginForm from "./_components/login-form";
 
-export default async function SessionAuthenticationPage() {
+export default async function JwtAuthenticationPage() {
   const cookieStore = await cookies();
-  const session = getSession(cookieStore.get(SESSION_COOKIE)?.value);
-  if (session) {
+  const result = verifyJwt(cookieStore.get(JWT_COOKIE)?.value);
+  if (result.ok) {
     redirect("/login-successfully");
   }
 
   return (
-    <AuthPageShell title="Session Authentication">
+    <AuthPageShell title="JWT Authentication">
       <LoginForm />
     </AuthPageShell>
   );

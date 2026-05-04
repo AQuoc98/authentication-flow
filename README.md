@@ -23,3 +23,6 @@ bun dev
 ### Version 1.0
 
 - [x] Basic authentication flow implemented
+- [x] Session-based authentication flow implemented
+- [x] JWT authentication flow implemented
+- [x] Token-based authentication flow implemented

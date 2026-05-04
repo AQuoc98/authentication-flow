@@ -11,8 +11,17 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
+const AUTH_FLOWS = [
+  { value: "basic", label: "Basic Authentication", path: "/basic-authentication" },
+  { value: "session", label: "Session Authentication", path: "/session-authentication" },
+  { value: "token", label: "Token Based Authentication", path: "/token-authentication" },
+  { value: "jwt", label: "JWT Authentication", path: "/jwt-authentication" },
+] as const;
+
 export default function Home() {
-  const [value, setValue] = useState("basic");
+  const [value, setValue] = useState<(typeof AUTH_FLOWS)[number]["value"]>(
+    "basic",
+  );
   const router = useRouter();
 
   return (
@@ -22,27 +31,26 @@ export default function Home() {
           <label className="text-sm font-medium text-black">
             Authentication Flow
           </label>
-          <Select value={value} onValueChange={setValue}>
+          <Select
+            value={value}
+            onValueChange={(v) => setValue(v as typeof value)}
+          >
             <SelectTrigger className="w-96">
               <SelectValue placeholder="Select authentication" />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="basic">Basic Authentication</SelectItem>
-              <SelectItem value="session">Session Authentication</SelectItem>
-              <SelectItem value="token">Token Based Authentication</SelectItem>
-              <SelectItem value="jwt">JWT Authentication</SelectItem>
+              {AUTH_FLOWS.map((flow) => (
+                <SelectItem key={flow.value} value={flow.value}>
+                  {flow.label}
+                </SelectItem>
+              ))}
             </SelectContent>
           </Select>
         </div>
         <Button
           onClick={() => {
-            const path =
-              value === "basic"
-                ? "/basic-authentication"
-                : value === "session"
-                  ? "/session-authentication"
-                  : "/token-authentication";
-            router.push(path);
+            const flow = AUTH_FLOWS.find((f) => f.value === value);
+            if (flow) router.push(flow.path);
           }}
         >
           Go

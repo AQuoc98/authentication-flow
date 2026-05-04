@@ -1,9 +1,6 @@
 import { NextResponse } from "next/server";
-import { TOKEN_COOKIE } from "@/lib/auth";
+import { DEMO_EMAIL, DEMO_PASSWORD, TOKEN_COOKIE } from "@/lib/auth";
 import { SWT_TTL_MS, createSwt } from "@/lib/swt";
-
-const VALID_EMAIL = "admin@example.com";
-const VALID_PASSWORD = "password";
 
 export async function POST(request: Request) {
   let body: { email?: string; password?: string };
@@ -21,7 +18,7 @@ export async function POST(request: Request) {
     );
   }
 
-  if (email !== VALID_EMAIL || password !== VALID_PASSWORD) {
+  if (email !== DEMO_EMAIL || password !== DEMO_PASSWORD) {
     return NextResponse.json(
       { error: "Invalid credentials" },
       { status: 422 },

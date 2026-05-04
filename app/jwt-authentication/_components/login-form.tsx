@@ -2,13 +2,13 @@
 
 import CredentialsForm from "@/app/_components/credentials-form";
 
-const TOKEN_STORAGE_KEY = "swt-token";
+const JWT_STORAGE_KEY = "jwt-access-token";
 
 const LoginForm = () => {
   return (
     <CredentialsForm
       onSubmit={async ({ email, password }) => {
-        const response = await fetch("/api/token/login", {
+        const response = await fetch("/api/jwt/login", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ email, password }),
@@ -16,7 +16,7 @@ const LoginForm = () => {
 
         if (response.ok) {
           const data = (await response.json()) as { token: string };
-          window.localStorage.setItem(TOKEN_STORAGE_KEY, data.token);
+          window.localStorage.setItem(JWT_STORAGE_KEY, data.token);
           return { ok: true };
         }
 

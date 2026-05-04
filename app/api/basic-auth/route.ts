@@ -1,8 +1,5 @@
 import { NextResponse } from "next/server";
-import { BASIC_AUTH_COOKIE } from "@/lib/auth";
-
-const VALID_USERNAME = "admin@example.com";
-const VALID_PASSWORD = "password";
+import { BASIC_AUTH_COOKIE, DEMO_EMAIL, DEMO_PASSWORD } from "@/lib/auth";
 
 function unauthorized() {
   return NextResponse.json(
@@ -34,7 +31,7 @@ export async function GET(request: Request) {
   const username = decoded.slice(0, separatorIndex);
   const password = decoded.slice(separatorIndex + 1);
 
-  if (username !== VALID_USERNAME || password !== VALID_PASSWORD) {
+  if (username !== DEMO_EMAIL || password !== DEMO_PASSWORD) {
     return unauthorized();
   }
 

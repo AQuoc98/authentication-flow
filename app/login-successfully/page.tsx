@@ -1,22 +1,52 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
-import { BASIC_AUTH_COOKIE, SESSION_COOKIE, TOKEN_COOKIE } from "@/lib/auth";
+import {
+  BASIC_AUTH_COOKIE,
+  JWT_COOKIE,
+  SESSION_COOKIE,
+  TOKEN_COOKIE,
+} from "@/lib/auth";
 import { getSession } from "@/lib/session-store";
 import { verifySwt } from "@/lib/swt";
+import { verifyJwt } from "@/lib/jwt";
 import LogoutButton from "./_components/logout-button";
+
+type AuthCheck = {
+  name: string;
+  isAuthenticated: (cookieValue: string | undefined) => boolean;
+  cookieName: string;
+};
+
+const authChecks: AuthCheck[] = [
+  {
+    name: "basic",
+    cookieName: BASIC_AUTH_COOKIE,
+    isAuthenticated: (value) => Boolean(value),
+  },
+  {
+    name: "session",
+    cookieName: SESSION_COOKIE,
+    isAuthenticated: (value) => Boolean(getSession(value)),
+  },
+  {
+    name: "swt",
+    cookieName: TOKEN_COOKIE,
+    isAuthenticated: (value) => Boolean(verifySwt(value ?? "")),
+  },
+  {
+    name: "jwt",
+    cookieName: JWT_COOKIE,
+    isAuthenticated: (value) => verifyJwt(value).ok,
+  },
+];
 
 export default async function LoginSuccessfullyPage() {
   const cookieStore = await cookies();
-
-  const hasBasicAuth = Boolean(cookieStore.get(BASIC_AUTH_COOKIE)?.value);
-  const hasValidSession = Boolean(
-    getSession(cookieStore.get(SESSION_COOKIE)?.value),
-  );
-  const hasValidToken = Boolean(
-    verifySwt(cookieStore.get(TOKEN_COOKIE)?.value ?? ""),
+  const isAuthenticated = authChecks.some((check) =>
+    check.isAuthenticated(cookieStore.get(check.cookieName)?.value),
   );
 
-  if (!hasBasicAuth && !hasValidSession && !hasValidToken) {
+  if (!isAuthenticated) {
     redirect("/");
   }
 

@@ -79,10 +79,13 @@ After login, the cookie is what keeps the user "signed in" for the protected pag
 
 ```
 app/
-├── page.tsx                                          # Home: Select + Go
+├── page.tsx                                          # Home: Select + Go (AUTH_FLOWS lookup)
+├── _components/
+│   ├── credentials-form.tsx                          # Shared client form (email + password + submit)
+│   └── auth-page-shell.tsx                           # Shared Card + title wrapper for login pages
 ├── basic-authentication/
 │   ├── page.tsx                                      # Server page: guard + render form
-│   └── _components/login-form.tsx                    # Client form: encode creds + fetch
+│   └── _components/login-form.tsx                    # Thin wrapper: encode creds + fetch
 ├── api/
 │   ├── basic-auth/route.ts                           # Validate creds, set session cookie
 │   └── logout/route.ts                               # Clear all auth cookies
@@ -90,14 +93,25 @@ app/
     ├── page.tsx                                      # Server page: cookie check + render
     └── _components/logout-button.tsx                 # Client button: call /api/logout
 lib/
-└── auth.ts                                           # Shared list of auth cookie names
+└── auth.ts                                           # Cookie names + DEMO_EMAIL / DEMO_PASSWORD
 ```
 
 ### How a request flows step-by-step
 
 #### 1. User selects "Basic Authentication" on `/`
 
-`app/page.tsx` is a small client component with a `<Select>` and a `Go` button. Clicking Go calls `router.push("/basic-authentication")`.
+`app/page.tsx` is a small client component with a `<Select>` and a `Go` button. Both the dropdown options and the Go destination are driven by a single `AUTH_FLOWS` lookup table:
+
+```ts
+const AUTH_FLOWS = [
+  { value: "basic",   label: "Basic Authentication",       path: "/basic-authentication" },
+  { value: "session", label: "Session Authentication",     path: "/session-authentication" },
+  { value: "token",   label: "Token Based Authentication", path: "/token-authentication" },
+  { value: "jwt",     label: "JWT Authentication",         path: "/jwt-authentication" },
+] as const;
+```
+
+Clicking **Go** looks up the selected flow and calls `router.push(flow.path)`. Adding a new flow is a one-line change here.
 
 #### 2. The login page renders
 
@@ -114,13 +128,24 @@ If the user already has a valid session cookie, they skip the form and go straig
 
 #### 3. The form posts credentials
 
-`app/basic-authentication/_components/login-form.tsx` is a client component. On submit it:
+All four flows share `app/_components/credentials-form.tsx`, which owns the email/password inputs, submit button, password visibility toggle, error/loading UI, and the post-success `router.push` + `router.refresh`. Each flow plugs in its own `onSubmit`:
 
-```ts
-const credentials = btoa(`${email}:${password}`);
-const response = await fetch("/api/basic-auth", {
-  headers: { Authorization: `Basic ${credentials}` },
-});
+`app/basic-authentication/_components/login-form.tsx`:
+
+```tsx
+export function LoginForm() {
+  return (
+    <CredentialsForm
+      onSubmit={async ({ email, password }) => {
+        const credentials = btoa(`${email}:${password}`);
+        const response = await fetch("/api/basic-auth", {
+          headers: { Authorization: `Basic ${credentials}` },
+        });
+        return response.ok ? { ok: true } : { ok: false, message: "Invalid email or password." };
+      }}
+    />
+  );
+}
 ```
 
 - `btoa(...)` produces the base64 string that sits inside the `Authorization` header.
@@ -156,16 +181,29 @@ If not, the form sets an `error` state and shows "Invalid email or password." in
 
 #### 6. The success page is guarded
 
-`app/login-successfully/page.tsx` is a server component. It reads cookies and redirects to `/` if **none** of the auth cookies are set:
+`app/login-successfully/page.tsx` is a server component. Instead of an ever-growing `if (!a && !b && !c && !d)` chain, the guard is driven by an array of checkers — one per flow:
 
 ```ts
-const isAuthenticated = AUTH_COOKIES.some(
-  (name) => cookieStore.get(name)?.value,
+type AuthCheck = {
+  name: string;
+  cookieName: string;
+  isAuthenticated: (value: string) => boolean;
+};
+
+const authChecks: AuthCheck[] = [
+  { name: "basic",   cookieName: BASIC_AUTH_COOKIE, isAuthenticated: (v) => Boolean(v) },
+  { name: "session", cookieName: SESSION_COOKIE,    isAuthenticated: (v) => Boolean(getSession(v)) },
+  { name: "token",   cookieName: TOKEN_COOKIE,      isAuthenticated: (v) => Boolean(verifySwt(v)) },
+  { name: "jwt",     cookieName: JWT_COOKIE,        isAuthenticated: (v) => verifyJwt(v).ok },
+];
+
+const isAuthenticated = authChecks.some((c) =>
+  c.isAuthenticated(cookieStore.get(c.cookieName)?.value ?? ""),
 );
 if (!isAuthenticated) redirect("/");
 ```
 
-This is important: without this guard, anyone could navigate to `/login-successfully` directly.
+Adding a new flow = pushing one entry into the array. Without this guard, anyone could navigate to `/login-successfully` directly.
 
 #### 7. Logout
 
@@ -186,7 +224,7 @@ email:    admin@example.com
 password: password
 ```
 
-These are hardcoded in `app/api/basic-auth/route.ts` for the demo only.
+Centralized in `lib/auth.ts` as `DEMO_EMAIL` / `DEMO_PASSWORD`, imported by every login route handler.
 
 ### Security notes
 
@@ -280,14 +318,14 @@ sequenceDiagram
 app/
 ├── session-authentication/
 │   ├── page.tsx                                   # Server page: guard + render form
-│   └── _components/login-form.tsx                 # Client form: POST credentials
+│   └── _components/login-form.tsx                 # Thin wrapper: POST credentials
 └── api/
     └── session/
         ├── login/route.ts                         # Validate creds, create session, set cookie
         ├── logout/route.ts                        # Destroy session, clear cookie
         └── me/route.ts                            # Return current user
 lib/
-├── auth.ts                                        # Shared cookie names (incl. SESSION_COOKIE)
+├── auth.ts                                        # SESSION_COOKIE + DEMO_EMAIL / DEMO_PASSWORD
 └── session-store.ts                               # In-memory session store (id → user)
 ```
 
@@ -325,17 +363,22 @@ That's the key difference from Basic Auth: the server has authoritative state. A
 
 #### 3. The login form
 
-`app/session-authentication/_components/login-form.tsx` POSTs the credentials as JSON:
+`app/session-authentication/_components/login-form.tsx` is a thin wrapper around the shared `<CredentialsForm>`:
 
-```ts
-const response = await fetch("/api/session/login", {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ email, password }),
-});
+```tsx
+<CredentialsForm
+  onSubmit={async ({ email, password }) => {
+    const response = await fetch("/api/session/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+    return response.ok ? { ok: true } : { ok: false, message: "Invalid email or password." };
+  }}
+/>
 ```
 
-On `200` it redirects to `/login-successfully`; on `401` it shows an inline error.
+On `200` `<CredentialsForm>` redirects to `/login-successfully`; on a failed result it shows an inline error.
 
 #### 4. The login API
 
@@ -359,13 +402,10 @@ response.cookies.set({
 
 #### 5. The success page
 
-`app/login-successfully/page.tsx` is shared by every flow. For session auth it validates against the store:
+`app/login-successfully/page.tsx` is shared by every flow. It runs an array of `AuthCheck` entries — one per flow — and redirects to `/` if **none** authenticate. The session entry calls `getSession(...)` against the store, so a stale or revoked session ID never passes:
 
 ```ts
-const hasValidSession = Boolean(
-  getSession(cookieStore.get(SESSION_COOKIE)?.value),
-);
-if (!hasBasicAuth && !hasValidSession) redirect("/");
+{ name: "session", cookieName: SESSION_COOKIE, isAuthenticated: (v) => Boolean(getSession(v)) }
 ```
 
 #### 6. Logout
@@ -382,7 +422,7 @@ email:    admin@example.com
 password: password
 ```
 
-Hardcoded in `app/api/session/login/route.ts`.
+Centralized in `lib/auth.ts` as `DEMO_EMAIL` / `DEMO_PASSWORD`.
 
 ### Security notes
 
@@ -491,14 +531,14 @@ sequenceDiagram
 app/
 ├── token-authentication/
 │   ├── page.tsx                                   # Server page: guard + render form
-│   └── _components/login-form.tsx                 # Client form: POST creds, store token
+│   └── _components/login-form.tsx                 # Thin wrapper: POST creds, store token
 └── api/
     └── token/
         ├── login/route.ts                         # Validate creds, sign + return token
         ├── me/route.ts                            # Verify Bearer token, return user
         └── logout/route.ts                        # Clear token cookie
 lib/
-├── auth.ts                                        # Adds TOKEN_COOKIE = "swt-token"
+├── auth.ts                                        # TOKEN_COOKIE + DEMO_EMAIL / DEMO_PASSWORD
 └── swt.ts                                         # createSwt / verifySwt (HMAC-SHA256)
 ```
 
@@ -526,13 +566,22 @@ verifySwt(token)                        // recomputes HMAC, checks expiry, retur
 
 #### 3. The login form — `app/token-authentication/_components/login-form.tsx`
 
-```ts
-const response = await fetch("/api/token/login", { method: "POST", body: JSON.stringify({ email, password }) });
-if (response.ok) {
-  const data = await response.json();
-  window.localStorage.setItem("swt-token", data.token);
-  router.push("/login-successfully");
-}
+A thin wrapper around the shared `<CredentialsForm>`. The token is persisted to `localStorage` inside `onSubmit` **before** returning `{ ok: true }`, so by the time `<CredentialsForm>` redirects, the token is already in storage:
+
+```tsx
+<CredentialsForm
+  onSubmit={async ({ email, password }) => {
+    const response = await fetch("/api/token/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+    if (!response.ok) return { ok: false, message: "Invalid email or password." };
+    const data = await response.json();
+    window.localStorage.setItem("swt-token", data.token);
+    return { ok: true };
+  }}
+/>
 ```
 
 The token is stored in **two** places intentionally:
@@ -555,12 +604,13 @@ fetch("/api/token/me", { headers: { Authorization: `Bearer ${token}` } });
 
 `/token-authentication/page.tsx` redirects to `/login-successfully` if `verifySwt(cookie)` returns valid claims.
 
-`/login-successfully/page.tsx` accepts any of: valid Basic cookie, valid session, **or** valid SWT cookie:
+`/login-successfully/page.tsx` runs the shared list of `AuthCheck` entries; the SWT entry is:
 
 ```ts
-const hasValidToken = Boolean(verifySwt(cookieStore.get(TOKEN_COOKIE)?.value ?? ""));
-if (!hasBasicAuth && !hasValidSession && !hasValidToken) redirect("/");
+{ name: "token", cookieName: TOKEN_COOKIE, isAuthenticated: (v) => Boolean(verifySwt(v)) }
 ```
+
+If none of the checkers pass, the guard redirects to `/`.
 
 #### 6. Logout
 
@@ -573,7 +623,7 @@ email:    admin@example.com
 password: password
 ```
 
-Hardcoded in `app/api/token/login/route.ts`.
+Centralized in `lib/auth.ts` as `DEMO_EMAIL` / `DEMO_PASSWORD`.
 
 ### Security notes
 
@@ -596,3 +646,259 @@ Hardcoded in `app/api/token/login/route.ts`.
 5. Tamper with the token (e.g. change one character) and retry → `401`.
 6. Click **Logout** → cookie + localStorage are cleared, you return to `/`.
 7. Manually visit `/token-authentication` while logged in → redirected to `/login-successfully`.
+
+---
+
+## JWT Authentication (JSON Web Tokens)
+
+### What is a JWT?
+
+A **JWT (JSON Web Token)** is the most popular form of token-based authentication, defined by **[RFC 7519](https://datatracker.ietf.org/doc/html/rfc7519)**. Like SWT it's signed and self-contained, but the payload is **structured JSON** rather than a URL-encoded query string. JWT can be used for both **authorization** (this app) and **secure information exchange**.
+
+A JWT has **three parts** separated by dots:
+
+```
+<header>.<payload>.<signature>
+```
+
+Each part is **base64url-encoded**, so the whole token is URL-safe — it can be sent in headers, request bodies, or even URLs.
+
+#### Header
+
+```json
+{ "typ": "jwt", "alg": "HS256" }
+```
+
+- `typ` — token type, always `JWT`.
+- `alg` — signing algorithm. This demo uses `HS256` (HMAC-SHA256 with a shared secret).
+
+#### Payload (claims)
+
+```json
+{
+  "userId": "user_1",
+  "email": "admin@example.com",
+  "iss": "auth-flow",
+  "sub": "user_1",
+  "iat": 1735689600,
+  "exp": 1735689630
+}
+```
+
+JWT defines three categories of claims:
+
+| Type | Meaning | Examples used here |
+| --- | --- | --- |
+| **Registered** | Standard names from the spec | `iss`, `sub`, `iat`, `exp` |
+| **Public** | App-defined, intended to be shareable | `userId`, `email` |
+| **Private** | Custom names agreed between parties | (none here) |
+
+Other registered claims you might see in the wild: `aud` (audience), `nbf` (not before), `jti` (unique token id, useful for revocation lists).
+
+#### Signature
+
+```
+HMAC-SHA256(base64url(header) + "." + base64url(payload), SECRET)
+```
+
+The signature ensures the token wasn't tampered with. Anyone can **read** the payload (it's just base64), but only someone with the secret can **forge** a valid signature.
+
+### High-level flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant Form as Login Form
+    participant API as /api/jwt/login
+    participant Secure as /api/jwt/me
+
+    User->>Form: Open /jwt-authentication
+    User->>Form: Submit email + password
+    Form->>API: POST { email, password }
+
+    alt Valid credentials
+        API->>API: Sign JWT with secret key
+        API-->>Form: 200 OK + { token } + Set-Cookie jwt-access-token
+        Form-->>User: Redirect to /login-successfully
+    else Invalid credentials
+        API-->>Form: 422 Unprocessable Entity
+        Form-->>User: Show inline error
+    end
+
+    User->>Secure: Authorization Bearer <jwt>
+    Secure->>Secure: Verify signature + check exp
+    Secure-->>User: 200 (valid) or 401 (invalid/expired)
+```
+
+This mirrors the seven-step flow from the reference: (1) generate-token request → (2) validate creds → (3) generate token using secret → (4) return JWT → (5) request a secure endpoint with JWT in header → (6) validate JWT with secret → (7) response.
+
+### Routes and pages
+
+| Path                       | Type                  | Purpose                                                                  |
+| -------------------------- | --------------------- | ------------------------------------------------------------------------ |
+| `/jwt-authentication`      | Page (server)         | Login form. If a valid JWT cookie exists, redirects to success.          |
+| `/api/jwt/login`           | Route handler (POST)  | Validates creds; signs and returns a JWT; sets `jwt-access-token` cookie. |
+| `/api/jwt/me`              | Route handler (GET)   | Verifies `Authorization: Bearer <jwt>`, returns the claims.              |
+| `/api/jwt/logout`          | Route handler (POST)  | Clears the `jwt-access-token` cookie.                                    |
+| `/api/logout`              | Route handler (POST)  | Generic logout — clears every auth cookie (basic, session, swt, jwt).    |
+| `/login-successfully`      | Page (server)         | Validates the JWT cookie on every request. Expired → redirect to `/`.    |
+
+### Files
+
+```
+app/
+├── jwt-authentication/
+│   ├── page.tsx                                   # Server page: guard + render form
+│   └── _components/login-form.tsx                 # Thin wrapper: POST creds, store token
+└── api/
+    └── jwt/
+        ├── login/route.ts                         # Validate creds, sign JWT, set cookie
+        ├── me/route.ts                            # Verify Bearer JWT, return claims
+        └── logout/route.ts                        # Clear JWT cookie
+lib/
+├── auth.ts                                        # JWT_COOKIE + DEMO_EMAIL / DEMO_PASSWORD
+└── jwt.ts                                         # createJwt / verifyJwt (HS256 + claims)
+```
+
+### Step-by-step walkthrough
+
+#### 1. Signing & verifying — `lib/jwt.ts`
+
+```ts
+createJwt({ userId, email })   // → "<header>.<payload>.<signature>"
+verifyJwt(token)               // → { ok: true, claims } | { ok: false, reason }
+```
+
+Implementation notes:
+
+- Header is fixed: `{"typ":"jwt","alg":"HS256"}`.
+- Claims include `iss`, `sub`, `iat`, `exp` plus `userId` / `email` (public claims).
+- Signature: `HMAC-SHA256( header + "." + payload, JWT_SECRET )`, base64url-encoded.
+- Verification is constant-time (`crypto.timingSafeEqual`) and explicitly returns the failure reason: `"malformed" | "bad-signature" | "expired"`.
+
+> **Demo TTL is intentionally short — 30 seconds** (`JWT_TTL_MS` in `lib/jwt.ts`). This makes the "expired token" experience easy to demo (see below). Production tokens are typically 5–15 minutes for access tokens, paired with a longer-lived refresh token.
+
+#### 2. The login API — `app/api/jwt/login/route.ts`
+
+1. Reads `{ email, password }` from the JSON body.
+2. Returns `422 Unprocessable Entity` if missing or invalid (same convention used elsewhere in the app).
+3. On success: `createJwt({ userId, email })` and respond with:
+   ```json
+   { "token": "...", "tokenType": "Bearer", "expiresIn": 30, "user": {...} }
+   ```
+4. Also drops the JWT into a `jwt-access-token` cookie (so the **server-rendered guard** on `/login-successfully` can verify it without needing JavaScript).
+
+#### 3. The login form — `app/jwt-authentication/_components/login-form.tsx`
+
+A thin wrapper around the shared `<CredentialsForm>`. The token is persisted to `localStorage` inside `onSubmit` before returning success:
+
+```tsx
+<CredentialsForm
+  onSubmit={async ({ email, password }) => {
+    const response = await fetch("/api/jwt/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+    if (!response.ok) return { ok: false, message: "Invalid email or password." };
+    const { token } = await response.json();
+    window.localStorage.setItem("jwt-access-token", token);
+    return { ok: true };
+  }}
+/>
+```
+
+The token is stored in **two** places:
+
+- `localStorage["jwt-access-token"]` — read by client code to attach `Authorization: Bearer <jwt>` headers.
+- `jwt-access-token` cookie — read by the server-rendered page guards.
+
+#### 4. Calling protected APIs
+
+```ts
+const token = localStorage.getItem("jwt-access-token");
+fetch("/api/jwt/me", { headers: { Authorization: `Bearer ${token}` } });
+```
+
+`/api/jwt/me` returns:
+
+- `200` with the claims when the JWT is valid.
+- `401` with `{ error: "Token expired" | "Token bad-signature" | "Token malformed" }` otherwise.
+
+#### 5. Page guards
+
+`/jwt-authentication/page.tsx` — server component. If `verifyJwt(cookie)` is `ok`, redirect to `/login-successfully` (don't show the login form to a logged-in user).
+
+`/login-successfully/page.tsx` — server component. Runs the shared list of `AuthCheck` entries; the JWT entry is:
+
+```ts
+{ name: "jwt", cookieName: JWT_COOKIE, isAuthenticated: (v) => verifyJwt(v).ok }
+```
+
+Crucially, this guard runs on **every full page load** (the page is a Server Component). Once the JWT's `exp` passes, `verifyJwt` returns `{ ok: false, reason: "expired" }`, the JWT checker fails, and (if no other flow's checker passes) the guard redirects to `/`.
+
+#### 6. Logout
+
+The shared Logout button calls `POST /api/logout`, which clears every auth cookie (the `jwt-access-token` cookie included). The client also wipes `localStorage`. Because JWTs are stateless, the token itself is **still cryptographically valid until `exp`**; revocation in production is typically done with a deny-list keyed on `jti` or by rotating the signing secret.
+
+### Demoing the short-expiry redirect
+
+This is the case the user asked us to verify explicitly:
+
+> Token expires after a short period; when `/login-successfully` is reloaded, the user cannot access the page and is redirected to `/`.
+
+Steps:
+
+1. Go to `/` → choose **JWT Authentication** → **Go**.
+2. Sign in with `admin@example.com` / `password` → land on `/login-successfully`.
+3. Wait **>30 seconds** (the demo TTL).
+4. **Reload the page (Cmd-R / Ctrl-R)**.
+5. The server component runs the guard, `verifyJwt(...)` returns `{ ok: false, reason: "expired" }`, and you are redirected to `/`.
+
+You can confirm in DevTools → Application → Cookies that the cookie is still there (browsers honor `Max-Age=30`, after which the cookie is auto-deleted), and in the Network tab that the document response is a `307` redirect to `/`.
+
+### Demo credentials
+
+```
+email:    admin@example.com
+password: password
+```
+
+Centralized in `lib/auth.ts` as `DEMO_EMAIL` / `DEMO_PASSWORD`.
+
+### Inspecting a token
+
+Pick a token from `localStorage` after login and decode the parts:
+
+```js
+const t = localStorage.getItem("jwt-access-token").split(".");
+console.log("header :", JSON.parse(atob(t[0])));
+console.log("payload:", JSON.parse(atob(t[1])));
+console.log("sig    :", t[2]);
+```
+
+You'll see `{"typ":"jwt","alg":"HS256"}` and the claims, just like the reference image.
+
+### Security notes
+
+- **Strong secret in production.** A leaked `JWT_SECRET` lets an attacker forge tokens.
+- **HTTPS only.** A bearer token over plain HTTP can be replayed.
+- **Short access-token lifetime + refresh tokens.** The 30-second TTL here is for demo. Real apps issue short-lived access tokens (5–15 min) plus a longer refresh token stored httpOnly.
+- **Don't put secrets in claims.** The payload is readable by anyone holding the token.
+- **Validate `alg`.** Reject `alg: "none"`. If you use asymmetric keys (`RS256`, `ES256`), make sure your library doesn't accidentally accept HS256 with the public key.
+- **Revocation is hard.** Either keep tokens short-lived (this is the common answer) or maintain a `jti` deny-list. Stateless = fast, but no instant log-out everywhere.
+- **Use a battle-tested library** in production (e.g. `jose`). The handwritten implementation here is for learning.
+
+### Quick test checklist
+
+1. Go to `/` → choose **JWT Authentication** → click **Go**.
+2. Submit `admin@example.com` / `password` → land on `/login-successfully`.
+3. DevTools → Application:
+   - **Local Storage** has `jwt-access-token`.
+   - **Cookies** has `jwt-access-token` (httpOnly off so you can inspect it).
+4. Decode the payload in the console — you should see `userId`, `email`, `iat`, `exp`.
+5. **Wait 30+ seconds, then reload `/login-successfully`** → redirected to `/` (expired).
+6. From `/`, click Go again to log back in. The new token has a fresh `exp`.
+7. Tamper with the JWT (edit one character in any of the three parts) and call `/api/jwt/me` → `401` with `bad-signature`.
+8. Click **Logout** → cookie + localStorage cleared, redirected to `/`.
